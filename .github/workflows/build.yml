@@ -1,0 +1,86 @@
+name: Build R36S USB Ethernet modules
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git \
+            bc \
+            bison \
+            flex \
+            build-essential \
+            libssl-dev \
+            libelf-dev \
+            libncurses-dev \
+            cpio \
+            xz-utils \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu
+
+      - name: Clone R36S kernel
+        run: |
+          git clone \
+            --depth=1 \
+            --branch lineage-18.1 \
+            https://github.com/andr36oid/android_kernel_gameconsole_r36s.git \
+            kernel
+
+      - name: Show kernel revision
+        working-directory: kernel
+        run: |
+          git rev-parse HEAD
+          git status
+
+      - name: Build modules
+        run: |
+          chmod +x scripts/build-modules.sh
+          ./scripts/build-modules.sh
+
+      - name: Verify modules
+        run: |
+          echo "Modules:"
+          find output -type f -name '*.ko' -print
+
+          echo
+          echo "Dependencies:"
+          cat output/modules.dep 2>/dev/null || true
+
+          echo
+          echo "vermagic:"
+          for f in output/*.ko; do
+            echo "===== $f ====="
+            modinfo "$f" | grep -E '^(filename|description|depends|vermagic):' || true
+          done
+
+      - name: Package modules
+        run: |
+          mkdir -p release
+
+          cp output/*.ko release/
+
+          tar -czf \
+            r36s-usb-ethernet-modules.tar.gz \
+            -C release \
+            .
+
+      - name: Upload modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: r36s-usb-ethernet-modules
+          path: |
+            r36s-usb-ethernet-modules.tar.gz
+            release/*.ko
