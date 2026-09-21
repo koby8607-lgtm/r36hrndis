@@ -14,7 +14,7 @@ jobs:
     steps:
 
       # ============================================================
-      # Checkout this repository
+      # Checkout
       # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,6 +24,7 @@ jobs:
       # Install build dependencies
       # ============================================================
       - name: Install build dependencies
+        shell: bash
         run: |
           set -e
 
@@ -34,7 +35,9 @@ jobs:
             bison \
             build-essential \
             cpio \
+            dwarves \
             flex \
+            gcc \
             gcc-aarch64-linux-gnu \
             git \
             kmod \
@@ -44,6 +47,7 @@ jobs:
             make \
             perl \
             python3 \
+            python3-minimal \
             rsync \
             unzip \
             wget \
@@ -52,23 +56,56 @@ jobs:
 
 
       # ============================================================
-      # Verify compiler
+      # Verify host tools
       # ============================================================
-      - name: Verify ARM64 compiler
+      - name: Verify build tools
+        shell: bash
         run: |
           set -e
 
-          echo "ARM64 compiler:"
-          which aarch64-linux-gnu-gcc
+          echo "Host compiler:"
+          command -v gcc
+          gcc --version
 
           echo
+          echo "ARM64 compiler:"
+          command -v aarch64-linux-gnu-gcc
           aarch64-linux-gnu-gcc --version
 
+          echo
+          echo "Make:"
+          command -v make
+          make --version | head -n 1
+
+          echo
+          echo "Perl:"
+          command -v perl
+          perl --version | head -n 2
+
+          echo
+          echo "Python:"
+          command -v python3
+          python3 --version
+
+          echo
+          echo "Pahole:"
+          command -v pahole || true
+          pahole --version || true
+
+          echo
+          echo "Modinfo:"
+          command -v modinfo
+
+          echo
+          echo "Depmod:"
+          command -v depmod
+
 
       # ============================================================
-      # Clone R36S Android kernel
+      # Clone kernel
       # ============================================================
       - name: Clone R36S Android kernel
+        shell: bash
         run: |
           set -e
 
@@ -95,40 +132,7 @@ jobs:
 
 
       # ============================================================
-      # Check RTL8188EUS
-      # ============================================================
-      - name: Check RTL8188EUS source
-        working-directory: kernel
-        shell: bash
-        run: |
-          set -e
-
-          if [ -f \
-            drivers/net/wireless/realtek/rtl8188eus/Kconfig
-          ]; then
-
-            echo "rtl8188eus source is already present."
-
-          else
-
-            echo "rtl8188eus source is missing."
-
-            echo
-            echo "Searching for rtl8188eus references:"
-
-            grep -R \
-              "rtl8188eus" \
-              -n \
-              drivers/net/wireless \
-              arch/arm64/configs \
-              2>/dev/null \
-              || true
-
-          fi
-
-
-      # ============================================================
-      # Restore RTL8188EUS if missing
+      # Restore RTL8188EUS if required
       # ============================================================
       - name: Restore RTL8188EUS source
         working-directory: kernel
@@ -136,18 +140,23 @@ jobs:
         run: |
           set -e
 
-          if [ -f \
-            drivers/net/wireless/realtek/rtl8188eus/Kconfig
-          ]; then
+          RTL_DIR="drivers/net/wireless/realtek/rtl8188eus"
 
+          if [ -f "${RTL_DIR}/Kconfig" ]; then
             echo "rtl8188eus already exists."
             exit 0
-
           fi
 
+          echo "rtl8188eus is missing."
           echo "Cloning original RG351 kernel..."
 
           TMP_DIR="$(mktemp -d)"
+
+          cleanup() {
+            rm -rf "${TMP_DIR}"
+          }
+
+          trap cleanup EXIT
 
           git clone \
             --depth=1 \
@@ -170,23 +179,20 @@ jobs:
 
 
           if [ -z "${FOUND}" ]; then
-
             echo
             echo "ERROR: rtl8188eus was not found."
-            echo
 
-            echo "Available wireless driver directories:"
+            echo
+            echo "Available wireless drivers:"
 
             find \
               "${TMP_DIR}/rg351/drivers/net/wireless" \
-              -maxdepth 3 \
+              -maxdepth 4 \
               -type d \
               2>/dev/null \
-              | sort \
-              || true
+              | sort || true
 
             exit 1
-
           fi
 
 
@@ -194,32 +200,27 @@ jobs:
           echo "${FOUND}"
 
 
-          mkdir -p \
-            drivers/net/wireless/realtek/rtl8188eus
-
+          mkdir -p "${RTL_DIR}"
 
           cp -a \
             "${FOUND}/." \
-            drivers/net/wireless/realtek/rtl8188eus/
+            "${RTL_DIR}/"
 
 
           echo
-          echo "Restored rtl8188eus files:"
+          echo "Restored files:"
 
           find \
-            drivers/net/wireless/realtek/rtl8188eus \
+            "${RTL_DIR}" \
             -maxdepth 2 \
             -type f \
             | sort
 
 
-          rm -rf "${TMP_DIR}"
-
-
       # ============================================================
-      # Load the correct Android kernel configuration
+      # Load kernel configuration
       # ============================================================
-      - name: Load RG351MP kernel configuration
+      - name: Load kernel configuration
         working-directory: kernel
         shell: bash
         run: |
@@ -228,16 +229,13 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          echo "Loading:"
-          echo "  lineageos_rg351mp_defconfig"
-
           make lineageos_rg351mp_defconfig
 
 
       # ============================================================
-      # Inspect USB networking Kconfig
+      # Detect usbnet Kconfig symbol
       # ============================================================
-      - name: Inspect USB networking Kconfig
+      - name: Detect USB network configuration
         working-directory: kernel
         shell: bash
         run: |
@@ -248,61 +246,34 @@ jobs:
           echo "USB NETWORK KCONFIG"
           echo "========================================"
 
-          echo
-          echo "USB network configuration symbols:"
-
           grep -nE \
-            'config USB_(USB)?NET|config USB_NET_' \
+            '^[[:space:]]*config[[:space:]]+(USB_USBNET|USB_NET|USB_NET_RNDIS_HOST|USB_NET_CDCETHER)([[:space:]]|$)' \
             drivers/net/usb/Kconfig \
             || true
 
 
-          echo
-          echo "Relevant Kconfig definitions:"
-
-          grep -nE \
-            -A12 \
-            -B3 \
-            'config USB_NET|config USB_USBNET|config USB_NET_RNDIS_HOST|config USB_NET_CDCETHER' \
-            drivers/net/usb/Kconfig \
-            || true
-
-
-      # ============================================================
-      # Determine actual usbnet core symbol
-      # ============================================================
-      - name: Determine USB network core symbol
-        working-directory: kernel
-        shell: bash
-        run: |
-          set -e
-
-          if grep -qE '^config USB_USBNET([[:space:]]|$)' \
+          if grep -qE \
+            '^[[:space:]]*config[[:space:]]+USB_USBNET([[:space:]]|$)' \
             drivers/net/usb/Kconfig; then
 
-            echo "USB_NET_CORE=CONFIG_USB_USBNET" \
-              >> "${GITHUB_ENV}"
+            echo "USB_NET_CORE=CONFIG_USB_USBNET" >> "${GITHUB_ENV}"
 
-            echo "Detected USB network core:"
-            echo "CONFIG_USB_USBNET"
+            echo
+            echo "Using CONFIG_USB_USBNET"
 
-          elif grep -qE '^config USB_NET([[:space:]]|$)' \
+          elif grep -qE \
+            '^[[:space:]]*config[[:space:]]+USB_NET([[:space:]]|$)' \
             drivers/net/usb/Kconfig; then
 
-            echo "USB_NET_CORE=CONFIG_USB_NET" \
-              >> "${GITHUB_ENV}"
+            echo "USB_NET_CORE=CONFIG_USB_NET" >> "${GITHUB_ENV}"
 
-            echo "Detected USB network core:"
-            echo "CONFIG_USB_NET"
+            echo
+            echo "Using CONFIG_USB_NET"
 
           else
 
             echo
-            echo "ERROR:"
-            echo "Could not find the usbnet core Kconfig symbol."
-
-            echo
-            echo "drivers/net/usb/Kconfig:"
+            echo "ERROR: usbnet Kconfig symbol not found."
 
             cat drivers/net/usb/Kconfig
 
@@ -312,7 +283,7 @@ jobs:
 
 
       # ============================================================
-      # Configure USB Ethernet modules
+      # Configure USB Ethernet
       # ============================================================
       - name: Configure USB Ethernet modules
         working-directory: kernel
@@ -330,52 +301,33 @@ jobs:
           echo "========================================"
 
 
-          echo
-          echo "USB network core:"
-          echo "${USB_NET_CORE}"
-
-
-          # --------------------------------------------------------
           # Basic networking
-          # --------------------------------------------------------
+          ./scripts/config --enable CONFIG_NET
+          ./scripts/config --enable CONFIG_INET
 
-          ./scripts/config \
-            --enable CONFIG_NET
+          # USB
+          ./scripts/config --enable CONFIG_USB
 
-          ./scripts/config \
-            --enable CONFIG_INET
+          # usbnet
+          ./scripts/config --module "${USB_NET_CORE}"
 
-
-          # --------------------------------------------------------
-          # USB core
-          # --------------------------------------------------------
-
-          ./scripts/config \
-            --enable CONFIG_USB
-
-
-          # --------------------------------------------------------
-          # USB network core
-          # --------------------------------------------------------
-
-          ./scripts/config \
-            --module "${USB_NET_CORE}"
-
-
-          # --------------------------------------------------------
           # RNDIS host
-          # --------------------------------------------------------
+          ./scripts/config --module CONFIG_USB_NET_RNDIS_HOST
 
-          ./scripts/config \
-            --module CONFIG_USB_NET_RNDIS_HOST
-
-
-          # --------------------------------------------------------
           # CDC Ethernet
+          ./scripts/config --module CONFIG_USB_NET_CDCETHER
+
+
+          # --------------------------------------------------------
+          # Disable BTF.
+          #
+          # This kernel is an old Android kernel and BTF/pahole
+          # generation is unnecessary for the modules we need.
           # --------------------------------------------------------
 
-          ./scripts/config \
-            --module CONFIG_USB_NET_CDCETHER
+          ./scripts/config --disable CONFIG_DEBUG_INFO_BTF
+
+          ./scripts/config --disable CONFIG_DEBUG_INFO_BTF_MODULES
 
 
           echo
@@ -390,34 +342,23 @@ jobs:
           echo "========================================"
 
 
-          echo
-          echo "USB core:"
-
-          grep \
+          grep -E \
             '^CONFIG_USB=' \
             .config \
             || true
 
-
-          echo
-          echo "Networking:"
-
-          grep \
+          grep -E \
             '^CONFIG_NET=' \
             .config \
             || true
 
-          grep \
+          grep -E \
             '^CONFIG_INET=' \
             .config \
             || true
 
-
-          echo
-          echo "USB networking:"
-
           grep -E \
-            '^CONFIG_USB_(USB)?NET(=|_)' \
+            '^CONFIG_USB_(USBNET|NET)(=|_)' \
             .config \
             || true
 
@@ -432,9 +373,9 @@ jobs:
             || true
 
 
-          # ========================================================
-          # Read actual final values
-          # ========================================================
+          # --------------------------------------------------------
+          # Read values
+          # --------------------------------------------------------
 
           USB_NET_VALUE="$(
             grep "^${USB_NET_CORE}=" .config \
@@ -442,13 +383,11 @@ jobs:
               || true
           )"
 
-
           RNDIS_VALUE="$(
             grep '^CONFIG_USB_NET_RNDIS_HOST=' .config \
               | cut -d= -f2 \
               || true
           )"
-
 
           CDC_VALUE="$(
             grep '^CONFIG_USB_NET_CDCETHER=' .config \
@@ -459,7 +398,7 @@ jobs:
 
           echo
           echo "========================================"
-          echo "EXACT FINAL VALUES"
+          echo "EXACT VALUES"
           echo "========================================"
 
           echo "${USB_NET_CORE}=${USB_NET_VALUE}"
@@ -467,42 +406,82 @@ jobs:
           echo "CONFIG_USB_NET_CDCETHER=${CDC_VALUE}"
 
 
-          # ========================================================
-          # If Kconfig changed anything, dump useful information
-          # ========================================================
+          # --------------------------------------------------------
+          # Verify
+          # --------------------------------------------------------
 
-          if [ "${USB_NET_VALUE}" != "m" ] || \
-             [ "${RNDIS_VALUE}" != "m" ] || \
-             [ "${CDC_VALUE}" != "m" ]; then
+          if [ "${USB_NET_VALUE}" != "m" ]; then
+            echo
+            echo "ERROR: ${USB_NET_CORE} is not m."
+            exit 1
+          fi
+
+          if [ "${RNDIS_VALUE}" != "m" ]; then
+            echo
+            echo "ERROR: CONFIG_USB_NET_RNDIS_HOST is not m."
+            exit 1
+          fi
+
+          if [ "${CDC_VALUE}" != "m" ]; then
+            echo
+            echo "ERROR: CONFIG_USB_NET_CDCETHER is not m."
+            exit 1
+          fi
+
+
+          echo
+          echo "USB Ethernet configuration is correct."
+
+
+      # ============================================================
+      # Prepare kernel build system / modpost
+      # ============================================================
+      - name: Prepare kernel build system
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -e
+
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+
+          echo
+          echo "========================================"
+          echo "PREPARING KERNEL BUILD SYSTEM"
+          echo "========================================"
+
+
+          # Build the kernel's host-side tools first.
+          #
+          # In particular this makes sure scripts/mod/modpost
+          # exists before the external module build reaches
+          # the modpost stage.
+
+          make \
+            prepare
+
+          make \
+            scripts
+
+
+          echo
+          echo "Checking modpost..."
+
+          if [ ! -x scripts/mod/modpost ]; then
 
             echo
-            echo "========================================"
-            echo "KCONFIG DEPENDENCY FAILURE"
-            echo "========================================"
+            echo "ERROR: scripts/mod/modpost was not created."
 
             echo
-            echo "Relevant configuration:"
+            echo "scripts/mod contents:"
 
-            grep -E \
-              '^CONFIG_(NET|INET|USB|USB_SUPPORT|USB_NET)' \
-              .config \
-              || true
-
+            ls -la scripts/mod/ || true
 
             echo
-            echo "USB network Kconfig:"
+            echo "scripts contents:"
 
-            grep -nE \
-              -A20 \
-              -B5 \
-              'config USB_NET|config USB_USBNET|config USB_NET_RNDIS_HOST|config USB_NET_CDCETHER' \
-              drivers/net/usb/Kconfig \
-              || true
-
-
-            echo
-            echo "The requested drivers were not all configured"
-            echo "as modules."
+            ls -la scripts/ | head -100 || true
 
             exit 1
 
@@ -510,13 +489,26 @@ jobs:
 
 
           echo
-          echo "========================================"
-          echo "CONFIGURATION SUCCESS"
-          echo "========================================"
+          echo "modpost:"
+          file scripts/mod/modpost
 
-          echo "${USB_NET_CORE}=m"
-          echo "CONFIG_USB_NET_RNDIS_HOST=m"
-          echo "CONFIG_USB_NET_CDCETHER=m"
+          echo
+          echo "modpost dependencies:"
+          ldd scripts/mod/modpost || true
+
+
+          echo
+          echo "Testing modpost:"
+
+          scripts/mod/modpost \
+            --help \
+            >/dev/null \
+            2>&1 \
+            || true
+
+
+          echo
+          echo "modpost exists and is executable."
 
 
       # ============================================================
@@ -537,7 +529,6 @@ jobs:
           echo "KERNEL VERSION"
           echo "========================================"
 
-          echo "Kernel version:"
           make kernelversion
 
           echo
@@ -547,38 +538,41 @@ jobs:
 
           echo
           echo "========================================"
-          echo "BUILDING USB NETWORK MODULES"
+          echo "BUILDING USB ETHERNET MODULES"
           echo "========================================"
 
 
-          make -j"$(nproc)" \
+          make \
+            -j"$(nproc)" \
             M=drivers/net/usb \
             modules
 
 
           echo
           echo "========================================"
-          echo "CHECKING GENERATED MODULES"
+          echo "CHECKING MODULES"
           echo "========================================"
 
 
-          test -f \
-            drivers/net/usb/usbnet.ko
+          for module in \
+            usbnet \
+            rndis_host \
+            cdc_ether
+          do
 
-          test -f \
-            drivers/net/usb/rndis_host.ko
+            FILE="drivers/net/usb/${module}.ko"
 
-          test -f \
-            drivers/net/usb/cdc_ether.ko
+            if [ ! -f "${FILE}" ]; then
+              echo
+              echo "ERROR: ${FILE} was not generated."
+              exit 1
+            fi
 
+            echo
+            echo "${FILE}:"
+            ls -lh "${FILE}"
 
-          echo
-          echo "Generated modules:"
-
-          ls -lh \
-            drivers/net/usb/usbnet.ko \
-            drivers/net/usb/rndis_host.ko \
-            drivers/net/usb/cdc_ether.ko
+          done
 
 
       # ============================================================
@@ -599,14 +593,14 @@ jobs:
           )"
 
 
+          MODULE_DIR="../output/lib/modules/${KERNEL_RELEASE}"
+
+
           echo "Kernel release:"
           echo "${KERNEL_RELEASE}"
 
 
           rm -rf ../output
-
-
-          MODULE_DIR="../output/lib/modules/${KERNEL_RELEASE}"
 
 
           mkdir -p \
@@ -636,9 +630,9 @@ jobs:
 
 
       # ============================================================
-      # Generate depmod metadata
+      # Generate module dependency metadata
       # ============================================================
-      - name: Generate module dependencies
+      - name: Generate module dependency metadata
         working-directory: kernel
         shell: bash
         run: |
@@ -678,7 +672,7 @@ jobs:
 
           echo
           echo "========================================"
-          echo "GENERATED MODULE METADATA"
+          echo "MODULE METADATA"
           echo "========================================"
 
           find \
@@ -690,7 +684,7 @@ jobs:
 
 
       # ============================================================
-      # Verify modules
+      # Verify module metadata
       # ============================================================
       - name: Verify modules
         working-directory: kernel
@@ -710,6 +704,12 @@ jobs:
           MODULE_DIR="../output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb"
 
 
+          echo
+          echo "========================================"
+          echo "MODULE INFORMATION"
+          echo "========================================"
+
+
           for module in \
             usbnet \
             rndis_host \
@@ -718,15 +718,12 @@ jobs:
 
             FILE="${MODULE_DIR}/${module}.ko"
 
-
             echo
-            echo "========================================"
+            echo "----------------------------------------"
             echo "${module}.ko"
-            echo "========================================"
-
+            echo "----------------------------------------"
 
             test -f "${FILE}"
-
 
             modinfo "${FILE}" \
               | grep -E \
@@ -736,21 +733,19 @@ jobs:
           done
 
 
-          # ========================================================
-          # Read vermagic
-          # ========================================================
+          # --------------------------------------------------------
+          # Vermagic
+          # --------------------------------------------------------
 
           USBNET_VERMAGIC="$(
             modinfo "${MODULE_DIR}/usbnet.ko" \
               | awk -F': ' '$1 == "vermagic" {print $2}'
           )"
 
-
           RNDIS_VERMAGIC="$(
             modinfo "${MODULE_DIR}/rndis_host.ko" \
               | awk -F': ' '$1 == "vermagic" {print $2}'
           )"
-
 
           CDC_VERMAGIC="$(
             modinfo "${MODULE_DIR}/cdc_ether.ko" \
@@ -775,45 +770,33 @@ jobs:
           echo "${CDC_VERMAGIC}"
 
 
-          # ========================================================
-          # Verify vermagic exists
-          # ========================================================
-
-          if [ -z "${USBNET_VERMAGIC}" ] || \
-             [ -z "${RNDIS_VERMAGIC}" ] || \
-             [ -z "${CDC_VERMAGIC}" ]; then
-
-            echo
-            echo "ERROR: One or more modules have no vermagic."
-
+          if [ -z "${USBNET_VERMAGIC}" ]; then
+            echo "ERROR: usbnet vermagic is empty."
             exit 1
+          fi
 
+          if [ -z "${RNDIS_VERMAGIC}" ]; then
+            echo "ERROR: rndis_host vermagic is empty."
+            exit 1
+          fi
+
+          if [ -z "${CDC_VERMAGIC}" ]; then
+            echo "ERROR: cdc_ether vermagic is empty."
+            exit 1
           fi
 
 
-          # ========================================================
-          # Verify vermagic matches
-          # ========================================================
-
           if [ "${USBNET_VERMAGIC}" != "${RNDIS_VERMAGIC}" ]; then
-
             echo
-            echo "ERROR:"
-            echo "usbnet.ko and rndis_host.ko have different vermagic."
-
+            echo "ERROR: usbnet and rndis_host vermagic mismatch."
             exit 1
-
           fi
 
 
           if [ "${USBNET_VERMAGIC}" != "${CDC_VERMAGIC}" ]; then
-
             echo
-            echo "ERROR:"
-            echo "usbnet.ko and cdc_ether.ko have different vermagic."
-
+            echo "ERROR: usbnet and cdc_ether vermagic mismatch."
             exit 1
-
           fi
 
 
@@ -822,11 +805,13 @@ jobs:
 
 
       # ============================================================
-      # Prepare release files
+      # Prepare release
       # ============================================================
       - name: Prepare release
+        shell: bash
         run: |
           set -e
+
 
           KERNEL_RELEASE="$(
             make -s -C kernel kernelrelease
@@ -842,7 +827,7 @@ jobs:
 
 
           # --------------------------------------------------------
-          # Modules
+          # Copy modules
           # --------------------------------------------------------
 
           cp \
@@ -859,7 +844,7 @@ jobs:
 
 
           # --------------------------------------------------------
-          # depmod metadata
+          # Copy dependency metadata
           # --------------------------------------------------------
 
           for file in \
@@ -913,12 +898,15 @@ jobs:
       # Create ZIP
       # ============================================================
       - name: Create ZIP
+        shell: bash
         run: |
           set -e
 
           cd release
 
-          zip -9 -r \
+          zip \
+            -9 \
+            -r \
             ../r36s-usb-ethernet-modules.zip \
             .
 
@@ -927,7 +915,7 @@ jobs:
 
           echo
           echo "========================================"
-          echo "ZIP CREATED"
+          echo "ZIP"
           echo "========================================"
 
           ls -lh \
