@@ -3,24 +3,27 @@ name: Build R36S USB Ethernet Kernel Modules
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
-    name: Build USB Ethernet modules
+    name: Build R36S USB Ethernet modules
     runs-on: ubuntu-22.04
 
     steps:
 
-      # ------------------------------------------------------------
-      # Checkout this repository
-      # ------------------------------------------------------------
-      - name: Checkout build repository
+      # ============================================================
+      # Checkout our repository
+      # ============================================================
+      - name: Checkout
         uses: actions/checkout@v4
 
 
-      # ------------------------------------------------------------
-      # Install build dependencies
-      # ------------------------------------------------------------
-      - name: Install dependencies
+      # ============================================================
+      # Install host dependencies
+      # ============================================================
+      - name: Install build dependencies
         run: |
           sudo apt-get update
 
@@ -30,7 +33,6 @@ jobs:
             build-essential \
             cpio \
             flex \
-            gcc-aarch64-linux-gnu \
             git \
             libelf-dev \
             libncurses-dev \
@@ -40,27 +42,72 @@ jobs:
             python3 \
             rsync \
             unzip \
+            wget \
+            xz-utils \
             zip
 
 
-      # ------------------------------------------------------------
-      # Clone the exact kernel repository
-      # ------------------------------------------------------------
-      - name: Clone R36S Android kernel
+      # ============================================================
+      # Obtain Linaro GCC 6.3.1
+      #
+      # This is the compiler generation used by the andr36oid
+      # Android build environment.
+      # ============================================================
+      - name: Install Linaro GCC 6.3.1
         run: |
+          set -e
+
+          mkdir -p "${HOME}/toolchains"
+
+          cd "${HOME}/toolchains"
+
+          wget -q \
+            https://releases.linaro.org/components/toolchain/binaries/6.3-2017.02/aarch64-linux-gnu/gcc-linaro-6.3.1-2017.02-x86_64_aarch64-linux-gnu.tar.xz \
+            -O linaro-gcc.tar.xz
+
+          tar -xf linaro-gcc.tar.xz
+
+          echo "Linaro installation:"
+          find "${HOME}/toolchains" \
+            -maxdepth 2 \
+            -type d \
+            -print
+
+          TOOLCHAIN_DIR="$(find "${HOME}/toolchains" \
+            -maxdepth 1 \
+            -type d \
+            -name 'gcc-linaro-*' \
+            | head -n 1)"
+
+          if [ -z "${TOOLCHAIN_DIR}" ]; then
+            echo "ERROR: Linaro toolchain was not found"
+            exit 1
+          fi
+
+          echo "TOOLCHAIN_DIR=${TOOLCHAIN_DIR}" >> "${GITHUB_ENV}"
+          echo "${TOOLCHAIN_DIR}/bin" >> "${GITHUB_PATH}"
+
+
+      # ============================================================
+      # Clone kernel
+      #
+      # Do NOT use --depth=1. We want the complete history because
+      # this tree is derived from the RG351 kernel.
+      # ============================================================
+      - name: Clone R36S kernel
+        run: |
+          set -e
+
           git clone \
             --branch lineage-18.1 \
-            --depth=1 \
             https://github.com/andr36oid/android_kernel_gameconsole_r36s.git \
             kernel
 
+          cd kernel
 
-      # ------------------------------------------------------------
-      # Display kernel revision
-      # ------------------------------------------------------------
-      - name: Show kernel revision
-        working-directory: kernel
-        run: |
+          git submodule update --init --recursive || true
+
+          echo
           echo "Kernel commit:"
           git rev-parse HEAD
 
@@ -68,47 +115,192 @@ jobs:
           echo "Kernel branch:"
           git branch --show-current
 
+
+      # ============================================================
+      # Inspect the missing RTL8188EUS dependency
+      # ============================================================
+      - name: Inspect RTL8188EUS driver
+        working-directory: kernel
+        run: |
+          set +e
+
+          echo "Checking for rtl8188eus..."
+
+          if [ -d drivers/net/wireless/realtek/rtl8188eus ]; then
+            echo "rtl8188eus already exists."
+            find drivers/net/wireless/realtek/rtl8188eus \
+              -maxdepth 2 \
+              -type f | sort
+            exit 0
+          fi
+
           echo
-          echo "Kernel version:"
-          make kernelversion
+          echo "rtl8188eus is missing."
+          echo "Searching kernel tree for references..."
+
+          grep -R \
+            "rtl8188eus" \
+            -n \
+            drivers/net/wireless \
+            arch/arm64/configs \
+            2>/dev/null || true
+
+          echo
+          echo "Git remotes:"
+          git remote -v
+
+          echo
+          echo "Kernel history containing rtl8188eus:"
+          git log \
+            --all \
+            --oneline \
+            -- \
+            drivers/net/wireless/realtek/rtl8188eus \
+            2>/dev/null || true
 
 
-      # ------------------------------------------------------------
-      # Build modules
-      # ------------------------------------------------------------
-      - name: Configure and build USB Ethernet modules
+      # ============================================================
+      # Restore RTL8188EUS from the original RG351 kernel lineage
+      #
+      # The andr36oid kernel is forked from:
+      #
+      # turtleletortue/android_kernel_anbernic_rg351
+      #
+      # The RG351MP defconfig references rtl8188eus.
+      #
+      # Try the original repository first.
+      # ============================================================
+      - name: Restore RTL8188EUS source
+        working-directory: kernel
         shell: bash
         run: |
           set -e
 
-          cd kernel
+          if [ -d drivers/net/wireless/realtek/rtl8188eus ]; then
+            echo "rtl8188eus already present."
+            exit 0
+          fi
+
+          echo "Attempting to obtain rtl8188eus from the original RG351 kernel."
+
+          TMP_DIR="$(mktemp -d)"
+
+          git clone \
+            --no-tags \
+            https://github.com/turtleletortue/android_kernel_anbernic_rg351.git \
+            "${TMP_DIR}/rg351"
+
+          echo
+          echo "Searching original RG351 kernel..."
+
+          FOUND=""
+
+          if [ -d "${TMP_DIR}/rg351/drivers/net/wireless/realtek/rtl8188eus" ]; then
+            FOUND="${TMP_DIR}/rg351/drivers/net/wireless/realtek/rtl8188eus"
+          fi
+
+          if [ -z "${FOUND}" ]; then
+            FOUND="$(find \
+              "${TMP_DIR}/rg351" \
+              -type d \
+              -name rtl8188eus \
+              -print \
+              2>/dev/null | head -n 1)"
+          fi
+
+          if [ -z "${FOUND}" ]; then
+            echo
+            echo "ERROR: rtl8188eus could not be found in the original kernel."
+            echo
+            echo "Available Realtek directories:"
+            find \
+              "${TMP_DIR}/rg351/drivers/net/wireless" \
+              -maxdepth 3 \
+              -type d \
+              2>/dev/null | sort || true
+
+            exit 1
+          fi
+
+          echo "Found:"
+          echo "${FOUND}"
+
+          mkdir -p \
+            drivers/net/wireless/realtek/rtl8188eus
+
+          cp -a \
+            "${FOUND}/." \
+            drivers/net/wireless/realtek/rtl8188eus/
+
+          echo
+          echo "Restored rtl8188eus:"
+          find \
+            drivers/net/wireless/realtek/rtl8188eus \
+            -maxdepth 2 \
+            -type f \
+            | sort
+
+          rm -rf "${TMP_DIR}"
+
+
+      # ============================================================
+      # Verify the Kconfig dependency before touching the config
+      # ============================================================
+      - name: Verify kernel Kconfig
+        working-directory: kernel
+        run: |
+          set -e
+
+          echo "Checking rtl8188eus Kconfig..."
+
+          test -f \
+            drivers/net/wireless/realtek/rtl8188eus/Kconfig
+
+          echo "Kconfig exists."
+
+          echo
+          echo "Testing defconfig parser..."
 
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          echo "========================================"
-          echo "Loading R36S Android kernel configuration"
-          echo "========================================"
+          make lineageos_rg351mp_defconfig
+
+
+      # ============================================================
+      # Configure USB networking
+      # ============================================================
+      - name: Configure USB Ethernet modules
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -e
+
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          echo "Loading RG351MP/R36S Android configuration..."
 
           make lineageos_rg351mp_defconfig
 
 
           echo
-          echo "========================================"
-          echo "Enabling USB Ethernet modules"
-          echo "========================================"
+          echo "Enabling USB networking..."
 
           ./scripts/config --module CONFIG_USB_NET
           ./scripts/config --module CONFIG_USB_NET_RNDIS_HOST
           ./scripts/config --module CONFIG_USB_NET_CDCETHER
 
+
+          echo
+          echo "Resolving dependencies..."
+
           make olddefconfig
 
 
           echo
-          echo "========================================"
-          echo "USB networking configuration"
-          echo "========================================"
+          echo "Final USB configuration:"
+          echo "--------------------------------"
 
           grep -E \
             '^CONFIG_USB_NET=|^CONFIG_USB_NET_RNDIS_HOST=|^CONFIG_USB_NET_CDCETHER=' \
@@ -116,9 +308,7 @@ jobs:
 
 
           echo
-          echo "========================================"
-          echo "Checking configuration"
-          echo "========================================"
+          echo "Verifying module configuration..."
 
           test "$(grep '^CONFIG_USB_NET=' .config | cut -d= -f2)" = "m"
 
@@ -126,15 +316,31 @@ jobs:
 
           test "$(grep '^CONFIG_USB_NET_CDCETHER=' .config | cut -d= -f2)" = "m"
 
+          echo
+          echo "USB module configuration is correct."
+
+
+      # ============================================================
+      # Build only drivers/net/usb
+      # ============================================================
+      - name: Build USB networking modules
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -e
+
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          echo "Kernel version:"
+          make kernelversion
 
           echo
-          echo "Configuration OK."
-
+          echo "Kernel release:"
+          make kernelrelease
 
           echo
-          echo "========================================"
-          echo "Building USB networking modules"
-          echo "========================================"
+          echo "Building drivers/net/usb..."
 
           make -j"$(nproc)" \
             M=drivers/net/usb \
@@ -142,9 +348,12 @@ jobs:
 
 
           echo
-          echo "========================================"
-          echo "Checking generated modules"
-          echo "========================================"
+          echo "Checking modules..."
+
+          test -f drivers/net/usb/usbnet.ko
+          test -f drivers/net/usb/rndis_host.ko
+          test -f drivers/net/usb/cdc_ether.ko
+
 
           ls -lh \
             drivers/net/usb/usbnet.ko \
@@ -152,38 +361,63 @@ jobs:
             drivers/net/usb/cdc_ether.ko
 
 
-          echo
-          echo "========================================"
-          echo "Creating output directory"
-          echo "========================================"
+      # ============================================================
+      # Create proper /lib/modules/<release> tree
+      # ============================================================
+      - name: Install modules into staging tree
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -e
 
-          rm -rf ../output
-
-          mkdir -p ../output/lib/modules
-
-
-          echo
-          echo "========================================"
-          echo "Copying modules"
-          echo "========================================"
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
 
           KERNEL_RELEASE="$(make -s kernelrelease)"
 
-          echo "Kernel release: ${KERNEL_RELEASE}"
+          echo "Kernel release:"
+          echo "${KERNEL_RELEASE}"
 
-          mkdir -p "../output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb"
+          rm -rf ../output
+
+          mkdir -p \
+            "../output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb"
+
 
           cp \
             drivers/net/usb/usbnet.ko \
+            "../output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb/"
+
+          cp \
             drivers/net/usb/rndis_host.ko \
+            "../output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb/"
+
+          cp \
             drivers/net/usb/cdc_ether.ko \
             "../output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb/"
 
 
           echo
-          echo "========================================"
-          echo "Generating module dependencies"
-          echo "========================================"
+          echo "Staged modules:"
+
+          find \
+            "../output/lib/modules/${KERNEL_RELEASE}" \
+            -type f \
+            -print
+
+
+      # ============================================================
+      # Generate modules.dep, modules.alias, symbols, etc.
+      # ============================================================
+      - name: Generate module dependency files
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -e
+
+          KERNEL_RELEASE="$(make -s kernelrelease)"
+
+          echo "Running depmod for ${KERNEL_RELEASE}"
 
           depmod \
             -b ../output \
@@ -191,110 +425,194 @@ jobs:
 
 
           echo
-          echo "========================================"
-          echo "Generated module files"
-          echo "========================================"
+          echo "Generated module metadata:"
 
-          find "../output/lib/modules/${KERNEL_RELEASE}" \
+          find \
+            "../output/lib/modules/${KERNEL_RELEASE}" \
+            -maxdepth 1 \
             -type f \
-            -print | sort
+            -printf '%f\n' \
+            | sort
 
 
           echo
-          echo "========================================"
-          echo "modules.dep"
-          echo "========================================"
+          echo "modules.dep:"
+          echo "--------------------------------"
 
           cat \
             "../output/lib/modules/${KERNEL_RELEASE}/modules.dep"
 
 
-          echo
+      # ============================================================
+      # Verify module metadata
+      # ============================================================
+      - name: Verify modules
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -e
+
+          KERNEL_RELEASE="$(make -s kernelrelease)"
+
+          MODULE_DIR="../output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb"
+
           echo "========================================"
           echo "Module information"
           echo "========================================"
 
           for module in \
-            "../output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb/usbnet.ko" \
-            "../output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb/rndis_host.ko" \
-            "../output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb/cdc_ether.ko"
+            "${MODULE_DIR}/usbnet.ko" \
+            "${MODULE_DIR}/rndis_host.ko" \
+            "${MODULE_DIR}/cdc_ether.ko"
           do
             echo
             echo "----------------------------------------"
             echo "${module}"
             echo "----------------------------------------"
 
-            modinfo "${module}" || true
+            modinfo "${module}" \
+              | grep -E \
+                '^(filename|name|depends|vermagic|description):' \
+              || true
           done
 
 
-      # ------------------------------------------------------------
-      # Create a convenient flat copy of the modules
-      # ------------------------------------------------------------
-      - name: Prepare release directory
+          echo
+          echo "========================================"
+          echo "Checking vermagic"
+          echo "========================================"
+
+          USBNET_VERMAGIC="$(
+            modinfo "${MODULE_DIR}/usbnet.ko" \
+              | awk -F': ' '$1=="vermagic" {print $2}'
+          )"
+
+          RNDIS_VERMAGIC="$(
+            modinfo "${MODULE_DIR}/rndis_host.ko" \
+              | awk -F': ' '$1=="vermagic" {print $2}'
+          )"
+
+          CDC_VERMAGIC="$(
+            modinfo "${MODULE_DIR}/cdc_ether.ko" \
+              | awk -F': ' '$1=="vermagic" {print $2}'
+          )"
+
+
+          echo "usbnet:"
+          echo "${USBNET_VERMAGIC}"
+
+          echo
+          echo "rndis_host:"
+          echo "${RNDIS_VERMAGIC}"
+
+          echo
+          echo "cdc_ether:"
+          echo "${CDC_VERMAGIC}"
+
+
+          test -n "${USBNET_VERMAGIC}"
+          test -n "${RNDIS_VERMAGIC}"
+          test -n "${CDC_VERMAGIC}"
+
+
+          if [ "${USBNET_VERMAGIC}" != "${RNDIS_VERMAGIC}" ]; then
+            echo "ERROR: usbnet and rndis_host vermagic differ."
+            exit 1
+          fi
+
+          if [ "${USBNET_VERMAGIC}" != "${CDC_VERMAGIC}" ]; then
+            echo "ERROR: usbnet and cdc_ether vermagic differ."
+            exit 1
+          fi
+
+
+          echo
+          echo "All modules have matching vermagic."
+
+
+      # ============================================================
+      # Create simple release directory
+      # ============================================================
+      - name: Prepare release
         shell: bash
         run: |
           set -e
 
-          KERNEL_RELEASE="$(make -s -C kernel kernelrelease)"
+          KERNEL_RELEASE="$(
+            make -s -C kernel kernelrelease
+          )"
+
+          MODULE_DIR="output/lib/modules/${KERNEL_RELEASE}"
+
+          rm -rf release
 
           mkdir -p release
 
+
+          # Flat copies for easy installation
           cp \
-            "output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb/usbnet.ko" \
+            "${MODULE_DIR}/kernel/drivers/net/usb/usbnet.ko" \
             release/
 
           cp \
-            "output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb/rndis_host.ko" \
+            "${MODULE_DIR}/kernel/drivers/net/usb/rndis_host.ko" \
             release/
 
           cp \
-            "output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb/cdc_ether.ko" \
+            "${MODULE_DIR}/kernel/drivers/net/usb/cdc_ether.ko" \
             release/
 
 
-          # Copy generated dependency information
+          # Complete module metadata
           cp \
-            "output/lib/modules/${KERNEL_RELEASE}/modules.dep" \
+            "${MODULE_DIR}/modules.dep" \
             release/
 
           cp \
-            "output/lib/modules/${KERNEL_RELEASE}/modules.dep.bin" \
+            "${MODULE_DIR}/modules.dep.bin" \
             release/ || true
 
           cp \
-            "output/lib/modules/${KERNEL_RELEASE}/modules.alias" \
+            "${MODULE_DIR}/modules.alias" \
             release/ || true
 
           cp \
-            "output/lib/modules/${KERNEL_RELEASE}/modules.alias.bin" \
+            "${MODULE_DIR}/modules.alias.bin" \
             release/ || true
 
           cp \
-            "output/lib/modules/${KERNEL_RELEASE}/modules.symbols" \
+            "${MODULE_DIR}/modules.symbols" \
             release/ || true
 
           cp \
-            "output/lib/modules/${KERNEL_RELEASE}/modules.symbols.bin" \
+            "${MODULE_DIR}/modules.symbols.bin" \
             release/ || true
 
           cp \
-            "output/lib/modules/${KERNEL_RELEASE}/modules.softdep" \
+            "${MODULE_DIR}/modules.softdep" \
             release/ || true
 
 
-          # Save kernel release
-          echo "${KERNEL_RELEASE}" > release/kernel-release.txt
+          # Information about the build
+          echo "${KERNEL_RELEASE}" \
+            > release/kernel-release.txt
+
+          git -C kernel rev-parse HEAD \
+            > release/kernel-commit.txt
 
 
           echo
-          echo "Release contents:"
-          find release -maxdepth 1 -type f -printf '%f\n' | sort
+          echo "Release files:"
+          find release \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n' \
+            | sort
 
 
-      # ------------------------------------------------------------
+      # ============================================================
       # Create ZIP
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Create ZIP archive
         run: |
           set -e
@@ -305,37 +623,36 @@ jobs:
             ../r36s-usb-ethernet-modules.zip \
             .
 
-
           cd ..
 
           echo
-          echo "Created:"
+          echo "ZIP:"
           ls -lh r36s-usb-ethernet-modules.zip
 
 
-      # ------------------------------------------------------------
-      # Upload complete kernel module tree
-      # ------------------------------------------------------------
-      - name: Upload kernel module tree
+      # ============================================================
+      # Upload complete /lib/modules tree
+      # ============================================================
+      - name: Upload module tree
         uses: actions/upload-artifact@v4
         with:
           name: r36s-usb-ethernet-module-tree
           path: output/lib/modules/
 
 
-      # ------------------------------------------------------------
-      # Upload individual modules + dependency files
-      # ------------------------------------------------------------
-      - name: Upload release files
+      # ============================================================
+      # Upload flat release files
+      # ============================================================
+      - name: Upload modules
         uses: actions/upload-artifact@v4
         with:
           name: r36s-usb-ethernet-modules
           path: release/
 
 
-      # ------------------------------------------------------------
+      # ============================================================
       # Upload ZIP
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
