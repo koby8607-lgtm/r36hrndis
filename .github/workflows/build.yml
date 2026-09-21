@@ -14,17 +14,19 @@ jobs:
     steps:
 
       # ============================================================
-      # Checkout our repository
+      # Checkout
       # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
 
 
       # ============================================================
-      # Install host dependencies
+      # Host dependencies
       # ============================================================
       - name: Install build dependencies
         run: |
+          set -e
+
           sudo apt-get update
 
           sudo apt-get install -y \
@@ -33,6 +35,7 @@ jobs:
             build-essential \
             cpio \
             flex \
+            gcc-aarch64-linux-gnu \
             git \
             libelf-dev \
             libncurses-dev \
@@ -48,51 +51,21 @@ jobs:
 
 
       # ============================================================
-      # Obtain Linaro GCC 6.3.1
-      #
-      # This is the compiler generation used by the andr36oid
-      # Android build environment.
+      # Verify cross compiler
       # ============================================================
-      - name: Install Linaro GCC 6.3.1
+      - name: Check ARM64 compiler
         run: |
           set -e
 
-          mkdir -p "${HOME}/toolchains"
+          aarch64-linux-gnu-gcc --version
 
-          cd "${HOME}/toolchains"
-
-          wget -q \
-            https://releases.linaro.org/components/toolchain/binaries/6.3-2017.02/aarch64-linux-gnu/gcc-linaro-6.3.1-2017.02-x86_64_aarch64-linux-gnu.tar.xz \
-            -O linaro-gcc.tar.xz
-
-          tar -xf linaro-gcc.tar.xz
-
-          echo "Linaro installation:"
-          find "${HOME}/toolchains" \
-            -maxdepth 2 \
-            -type d \
-            -print
-
-          TOOLCHAIN_DIR="$(find "${HOME}/toolchains" \
-            -maxdepth 1 \
-            -type d \
-            -name 'gcc-linaro-*' \
-            | head -n 1)"
-
-          if [ -z "${TOOLCHAIN_DIR}" ]; then
-            echo "ERROR: Linaro toolchain was not found"
-            exit 1
-          fi
-
-          echo "TOOLCHAIN_DIR=${TOOLCHAIN_DIR}" >> "${GITHUB_ENV}"
-          echo "${TOOLCHAIN_DIR}/bin" >> "${GITHUB_PATH}"
+          echo
+          echo "Compiler:"
+          which aarch64-linux-gnu-gcc
 
 
       # ============================================================
-      # Clone kernel
-      #
-      # Do NOT use --depth=1. We want the complete history because
-      # this tree is derived from the RG351 kernel.
+      # Clone R36S kernel
       # ============================================================
       - name: Clone R36S kernel
         run: |
@@ -117,58 +90,32 @@ jobs:
 
 
       # ============================================================
-      # Inspect the missing RTL8188EUS dependency
+      # Check RTL8188EUS
       # ============================================================
-      - name: Inspect RTL8188EUS driver
+      - name: Check RTL8188EUS source
         working-directory: kernel
         run: |
-          set +e
+          set -e
 
-          echo "Checking for rtl8188eus..."
+          if [ -f \
+            drivers/net/wireless/realtek/rtl8188eus/Kconfig
+          ]; then
+            echo "rtl8188eus source is already present."
 
-          if [ -d drivers/net/wireless/realtek/rtl8188eus ]; then
-            echo "rtl8188eus already exists."
-            find drivers/net/wireless/realtek/rtl8188eus \
+            find \
+              drivers/net/wireless/realtek/rtl8188eus \
               -maxdepth 2 \
-              -type f | sort
-            exit 0
+              -type f \
+              | sort
+
+          else
+            echo "rtl8188eus source is missing."
+            echo "Will restore it in the next step."
           fi
-
-          echo
-          echo "rtl8188eus is missing."
-          echo "Searching kernel tree for references..."
-
-          grep -R \
-            "rtl8188eus" \
-            -n \
-            drivers/net/wireless \
-            arch/arm64/configs \
-            2>/dev/null || true
-
-          echo
-          echo "Git remotes:"
-          git remote -v
-
-          echo
-          echo "Kernel history containing rtl8188eus:"
-          git log \
-            --all \
-            --oneline \
-            -- \
-            drivers/net/wireless/realtek/rtl8188eus \
-            2>/dev/null || true
 
 
       # ============================================================
-      # Restore RTL8188EUS from the original RG351 kernel lineage
-      #
-      # The andr36oid kernel is forked from:
-      #
-      # turtleletortue/android_kernel_anbernic_rg351
-      #
-      # The RG351MP defconfig references rtl8188eus.
-      #
-      # Try the original repository first.
+      # Restore RTL8188EUS from RG351 kernel lineage
       # ============================================================
       - name: Restore RTL8188EUS source
         working-directory: kernel
@@ -176,48 +123,48 @@ jobs:
         run: |
           set -e
 
-          if [ -d drivers/net/wireless/realtek/rtl8188eus ]; then
-            echo "rtl8188eus already present."
+          if [ -f \
+            drivers/net/wireless/realtek/rtl8188eus/Kconfig
+          ]; then
+            echo "rtl8188eus already exists."
             exit 0
           fi
 
-          echo "Attempting to obtain rtl8188eus from the original RG351 kernel."
+          echo "Cloning original RG351 kernel..."
 
           TMP_DIR="$(mktemp -d)"
 
           git clone \
-            --no-tags \
+            --depth=1 \
             https://github.com/turtleletortue/android_kernel_anbernic_rg351.git \
             "${TMP_DIR}/rg351"
 
           echo
-          echo "Searching original RG351 kernel..."
+          echo "Searching for rtl8188eus..."
 
-          FOUND=""
-
-          if [ -d "${TMP_DIR}/rg351/drivers/net/wireless/realtek/rtl8188eus" ]; then
-            FOUND="${TMP_DIR}/rg351/drivers/net/wireless/realtek/rtl8188eus"
-          fi
-
-          if [ -z "${FOUND}" ]; then
-            FOUND="$(find \
+          FOUND="$(
+            find \
               "${TMP_DIR}/rg351" \
               -type d \
               -name rtl8188eus \
               -print \
-              2>/dev/null | head -n 1)"
-          fi
+              2>/dev/null \
+              | head -n 1
+          )"
 
           if [ -z "${FOUND}" ]; then
             echo
-            echo "ERROR: rtl8188eus could not be found in the original kernel."
+            echo "ERROR:"
+            echo "rtl8188eus was not found in the RG351 kernel."
+
             echo
-            echo "Available Realtek directories:"
+            echo "Available Realtek drivers:"
             find \
               "${TMP_DIR}/rg351/drivers/net/wireless" \
               -maxdepth 3 \
               -type d \
-              2>/dev/null | sort || true
+              2>/dev/null \
+              | sort || true
 
             exit 1
           fi
@@ -233,7 +180,7 @@ jobs:
             drivers/net/wireless/realtek/rtl8188eus/
 
           echo
-          echo "Restored rtl8188eus:"
+          echo "Restored files:"
           find \
             drivers/net/wireless/realtek/rtl8188eus \
             -maxdepth 2 \
@@ -244,33 +191,9 @@ jobs:
 
 
       # ============================================================
-      # Verify the Kconfig dependency before touching the config
+      # Configure kernel
       # ============================================================
-      - name: Verify kernel Kconfig
-        working-directory: kernel
-        run: |
-          set -e
-
-          echo "Checking rtl8188eus Kconfig..."
-
-          test -f \
-            drivers/net/wireless/realtek/rtl8188eus/Kconfig
-
-          echo "Kconfig exists."
-
-          echo
-          echo "Testing defconfig parser..."
-
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-
-          make lineageos_rg351mp_defconfig
-
-
-      # ============================================================
-      # Configure USB networking
-      # ============================================================
-      - name: Configure USB Ethernet modules
+      - name: Configure kernel
         working-directory: kernel
         shell: bash
         run: |
@@ -279,13 +202,14 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
 
-          echo "Loading RG351MP/R36S Android configuration..."
+          echo "Loading:"
+          echo "lineageos_rg351mp_defconfig"
 
           make lineageos_rg351mp_defconfig
 
 
           echo
-          echo "Enabling USB networking..."
+          echo "Enabling USB Ethernet modules..."
 
           ./scripts/config --module CONFIG_USB_NET
           ./scripts/config --module CONFIG_USB_NET_RNDIS_HOST
@@ -299,16 +223,16 @@ jobs:
 
 
           echo
-          echo "Final USB configuration:"
+          echo "USB networking configuration:"
           echo "--------------------------------"
 
           grep -E \
             '^CONFIG_USB_NET=|^CONFIG_USB_NET_RNDIS_HOST=|^CONFIG_USB_NET_CDCETHER=' \
-            .config || true
+            .config
 
 
           echo
-          echo "Verifying module configuration..."
+          echo "Checking configuration..."
 
           test "$(grep '^CONFIG_USB_NET=' .config | cut -d= -f2)" = "m"
 
@@ -317,13 +241,13 @@ jobs:
           test "$(grep '^CONFIG_USB_NET_CDCETHER=' .config | cut -d= -f2)" = "m"
 
           echo
-          echo "USB module configuration is correct."
+          echo "Configuration OK."
 
 
       # ============================================================
-      # Build only drivers/net/usb
+      # Build modules
       # ============================================================
-      - name: Build USB networking modules
+      - name: Build USB Ethernet modules
         working-directory: kernel
         shell: bash
         run: |
@@ -348,7 +272,7 @@ jobs:
 
 
           echo
-          echo "Checking modules..."
+          echo "Checking generated modules..."
 
           test -f drivers/net/usb/usbnet.ko
           test -f drivers/net/usb/rndis_host.ko
@@ -362,9 +286,9 @@ jobs:
 
 
       # ============================================================
-      # Create proper /lib/modules/<release> tree
+      # Stage modules
       # ============================================================
-      - name: Install modules into staging tree
+      - name: Stage modules
         working-directory: kernel
         shell: bash
         run: |
@@ -397,27 +321,19 @@ jobs:
             "../output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb/"
 
 
-          echo
-          echo "Staged modules:"
-
-          find \
-            "../output/lib/modules/${KERNEL_RELEASE}" \
-            -type f \
-            -print
-
-
       # ============================================================
-      # Generate modules.dep, modules.alias, symbols, etc.
+      # Generate dependencies
       # ============================================================
-      - name: Generate module dependency files
+      - name: Generate module dependencies
         working-directory: kernel
         shell: bash
         run: |
           set -e
 
-          KERNEL_RELEASE="$(make -s kernelrelease)"
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
 
-          echo "Running depmod for ${KERNEL_RELEASE}"
+          KERNEL_RELEASE="$(make -s kernelrelease)"
 
           depmod \
             -b ../output \
@@ -425,7 +341,16 @@ jobs:
 
 
           echo
-          echo "Generated module metadata:"
+          echo "modules.dep:"
+          echo "================================"
+
+          cat \
+            "../output/lib/modules/${KERNEL_RELEASE}/modules.dep"
+
+
+          echo
+          echo "Generated files:"
+          echo "================================"
 
           find \
             "../output/lib/modules/${KERNEL_RELEASE}" \
@@ -435,16 +360,8 @@ jobs:
             | sort
 
 
-          echo
-          echo "modules.dep:"
-          echo "--------------------------------"
-
-          cat \
-            "../output/lib/modules/${KERNEL_RELEASE}/modules.dep"
-
-
       # ============================================================
-      # Verify module metadata
+      # Verify modules
       # ============================================================
       - name: Verify modules
         working-directory: kernel
@@ -452,62 +369,74 @@ jobs:
         run: |
           set -e
 
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
           KERNEL_RELEASE="$(make -s kernelrelease)"
 
           MODULE_DIR="../output/lib/modules/${KERNEL_RELEASE}/kernel/drivers/net/usb"
 
-          echo "========================================"
-          echo "Module information"
-          echo "========================================"
 
-          for module in \
+          echo "================================"
+          echo "usbnet.ko"
+          echo "================================"
+
+          modinfo \
             "${MODULE_DIR}/usbnet.ko" \
-            "${MODULE_DIR}/rndis_host.ko" \
-            "${MODULE_DIR}/cdc_ether.ko"
-          do
-            echo
-            echo "----------------------------------------"
-            echo "${module}"
-            echo "----------------------------------------"
-
-            modinfo "${module}" \
-              | grep -E \
-                '^(filename|name|depends|vermagic|description):' \
-              || true
-          done
+            | grep -E \
+              '^(filename|name|depends|vermagic|description):' \
+            || true
 
 
           echo
-          echo "========================================"
+          echo "================================"
+          echo "rndis_host.ko"
+          echo "================================"
+
+          modinfo \
+            "${MODULE_DIR}/rndis_host.ko" \
+            | grep -E \
+              '^(filename|name|depends|vermagic|description):' \
+            || true
+
+
+          echo
+          echo "================================"
+          echo "cdc_ether.ko"
+          echo "================================"
+
+          modinfo \
+            "${MODULE_DIR}/cdc_ether.ko" \
+            | grep -E \
+              '^(filename|name|depends|vermagic|description):' \
+            || true
+
+
+          echo
+          echo "================================"
           echo "Checking vermagic"
-          echo "========================================"
+          echo "================================"
+
 
           USBNET_VERMAGIC="$(
             modinfo "${MODULE_DIR}/usbnet.ko" \
-              | awk -F': ' '$1=="vermagic" {print $2}'
+              | awk -F': ' '$1 == "vermagic" {print $2}'
           )"
 
           RNDIS_VERMAGIC="$(
             modinfo "${MODULE_DIR}/rndis_host.ko" \
-              | awk -F': ' '$1=="vermagic" {print $2}'
+              | awk -F': ' '$1 == "vermagic" {print $2}'
           )"
 
           CDC_VERMAGIC="$(
             modinfo "${MODULE_DIR}/cdc_ether.ko" \
-              | awk -F': ' '$1=="vermagic" {print $2}'
+              | awk -F': ' '$1 == "vermagic" {print $2}'
           )"
 
 
-          echo "usbnet:"
-          echo "${USBNET_VERMAGIC}"
-
-          echo
-          echo "rndis_host:"
-          echo "${RNDIS_VERMAGIC}"
-
-          echo
-          echo "cdc_ether:"
-          echo "${CDC_VERMAGIC}"
+          echo "usbnet:      ${USBNET_VERMAGIC}"
+          echo "rndis_host:  ${RNDIS_VERMAGIC}"
+          echo "cdc_ether:   ${CDC_VERMAGIC}"
 
 
           test -n "${USBNET_VERMAGIC}"
@@ -515,23 +444,16 @@ jobs:
           test -n "${CDC_VERMAGIC}"
 
 
-          if [ "${USBNET_VERMAGIC}" != "${RNDIS_VERMAGIC}" ]; then
-            echo "ERROR: usbnet and rndis_host vermagic differ."
-            exit 1
-          fi
-
-          if [ "${USBNET_VERMAGIC}" != "${CDC_VERMAGIC}" ]; then
-            echo "ERROR: usbnet and cdc_ether vermagic differ."
-            exit 1
-          fi
+          test "${USBNET_VERMAGIC}" = "${RNDIS_VERMAGIC}"
+          test "${USBNET_VERMAGIC}" = "${CDC_VERMAGIC}"
 
 
           echo
-          echo "All modules have matching vermagic."
+          echo "All three modules have matching vermagic."
 
 
       # ============================================================
-      # Create simple release directory
+      # Prepare release
       # ============================================================
       - name: Prepare release
         shell: bash
@@ -540,7 +462,7 @@ jobs:
 
           KERNEL_RELEASE="$(
             make -s -C kernel kernelrelease
-          )"
+          )
 
           MODULE_DIR="output/lib/modules/${KERNEL_RELEASE}"
 
@@ -549,7 +471,7 @@ jobs:
           mkdir -p release
 
 
-          # Flat copies for easy installation
+          # Main modules
           cp \
             "${MODULE_DIR}/kernel/drivers/net/usb/usbnet.ko" \
             release/
@@ -563,37 +485,23 @@ jobs:
             release/
 
 
-          # Complete module metadata
-          cp \
-            "${MODULE_DIR}/modules.dep" \
-            release/
-
-          cp \
-            "${MODULE_DIR}/modules.dep.bin" \
-            release/ || true
-
-          cp \
-            "${MODULE_DIR}/modules.alias" \
-            release/ || true
-
-          cp \
-            "${MODULE_DIR}/modules.alias.bin" \
-            release/ || true
-
-          cp \
-            "${MODULE_DIR}/modules.symbols" \
-            release/ || true
-
-          cp \
-            "${MODULE_DIR}/modules.symbols.bin" \
-            release/ || true
-
-          cp \
-            "${MODULE_DIR}/modules.softdep" \
-            release/ || true
+          # Dependency information
+          for file in \
+            modules.dep \
+            modules.dep.bin \
+            modules.alias \
+            modules.alias.bin \
+            modules.symbols \
+            modules.symbols.bin \
+            modules.softdep
+          do
+            if [ -f "${MODULE_DIR}/${file}" ]; then
+              cp "${MODULE_DIR}/${file}" release/
+            fi
+          done
 
 
-          # Information about the build
+          # Build information
           echo "${KERNEL_RELEASE}" \
             > release/kernel-release.txt
 
@@ -602,7 +510,7 @@ jobs:
 
 
           echo
-          echo "Release files:"
+          echo "Release contents:"
           find release \
             -maxdepth 1 \
             -type f \
@@ -611,9 +519,9 @@ jobs:
 
 
       # ============================================================
-      # Create ZIP
+      # ZIP
       # ============================================================
-      - name: Create ZIP archive
+      - name: Create ZIP
         run: |
           set -e
 
@@ -625,13 +533,12 @@ jobs:
 
           cd ..
 
-          echo
-          echo "ZIP:"
-          ls -lh r36s-usb-ethernet-modules.zip
+          ls -lh \
+            r36s-usb-ethernet-modules.zip
 
 
       # ============================================================
-      # Upload complete /lib/modules tree
+      # Upload complete module tree
       # ============================================================
       - name: Upload module tree
         uses: actions/upload-artifact@v4
@@ -641,7 +548,7 @@ jobs:
 
 
       # ============================================================
-      # Upload flat release files
+      # Upload individual release
       # ============================================================
       - name: Upload modules
         uses: actions/upload-artifact@v4
