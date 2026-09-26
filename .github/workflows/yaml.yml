@@ -1,0 +1,245 @@
+name: Build R36S boot.img
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'GitHub Actions runner label (large/self-hosted runner recommended)'
+        required: true
+        default: 'ubuntu-24.04'
+        type: string
+      repo_sync_jobs:
+        description: 'repo sync parallel jobs'
+        required: true
+        default: '4'
+        type: string
+      build_jobs:
+        description: 'Android build parallel jobs'
+        required: true
+        default: '$(nproc)'
+        type: string
+
+jobs:
+  build-bootimage:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 360
+
+    env:
+      ANDROID_BUILD_TOP: ${{ github.workspace }}/android
+      REPO_SYNC_JOBS: ${{ inputs.repo_sync_jobs }}
+      BUILD_JOBS: ${{ inputs.build_jobs }}
+      TOOLCHAIN: ${{ github.workspace }}/toolchains/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu
+
+    steps:
+      - name: Free preinstalled runner space
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo rm -rf /usr/local/lib/android/sdk || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/.ghcup || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo docker system prune -af || true
+
+          df -h /
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            curl \
+            dosfstools \
+            flex \
+            g++-multilib \
+            gcc-multilib \
+            git \
+            git-lfs \
+            gnupg \
+            gperf \
+            imagemagick \
+            kpartx \
+            lib32readline-dev \
+            lib32z1-dev \
+            libdw-dev \
+            libelf-dev \
+            libssl-dev \
+            libxml2 \
+            libxml2-utils \
+            lz4 \
+            lzop \
+            mtools \
+            parted \
+            pngcrush \
+            protobuf-compiler \
+            python3-protobuf \
+            python-is-python3 \
+            repo \
+            rsync \
+            schedtool \
+            squashfs-tools \
+            wget \
+            xsltproc \
+            zip \
+            zlib1g-dev
+
+          cd /tmp
+
+          wget -q \
+            https://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2_amd64.deb
+          sudo dpkg -i libtinfo5_6.3-2_amd64.deb
+          rm -f libtinfo5_6.3-2_amd64.deb
+
+          wget -q \
+            https://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libncurses5_6.3-2_amd64.deb
+          sudo dpkg -i libncurses5_6.3-2_amd64.deb
+          rm -f libncurses5_6.3-2_amd64.deb
+
+          git lfs install --system
+
+          git config --global user.name "GitHub Actions Builder"
+          git config --global user.email "actions@github.local"
+
+          df -h /
+
+      - name: Install repo launcher
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "$HOME/bin"
+
+          curl -fsSL \
+            https://storage.googleapis.com/git-repo-downloads/repo \
+            > "$HOME/bin/repo"
+
+          chmod a+rx "$HOME/bin/repo"
+
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+          "$HOME/bin/repo" version
+
+      - name: Clone R36S Linaro 6.3.1 toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "$(dirname "$TOOLCHAIN")"
+
+          git clone --depth=1 \
+            https://github.com/andr36oid/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu \
+            "$TOOLCHAIN"
+
+          test -x "$TOOLCHAIN/bin/aarch64-linux-gnu-gcc"
+
+          "$TOOLCHAIN/bin/aarch64-linux-gnu-gcc" --version
+
+      - name: Initialize LineageOS 18.1 source
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf "$ANDROID_BUILD_TOP"
+          mkdir -p "$ANDROID_BUILD_TOP"
+
+          cd "$ANDROID_BUILD_TOP"
+
+          repo init \
+            -u https://github.com/andr36oid/android.git \
+            -b lineage-18.1 \
+            --git-lfs \
+            --depth=1
+
+          git clone \
+            -b main \
+            https://github.com/andr36oid/local_manifests \
+            .repo/local_manifests
+
+      - name: Sync Android source
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd "$ANDROID_BUILD_TOP"
+
+          repo sync \
+            -c \
+            --no-clone-bundle \
+            --no-tags \
+            -j"$REPO_SYNC_JOBS"
+
+      - name: Verify R36S device tree and kernel configuration
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd "$ANDROID_BUILD_TOP"
+
+          test -d device/gameconsole/r36s
+          test -f device/gameconsole/r36s/BoardConfig.mk
+          test -f kernel/gameconsole/r36s/arch/arm64/configs/lineageos_r36s_defconfig
+
+          grep -n \
+            'TARGET_KERNEL_CONFIG.*lineageos_r36s_defconfig' \
+            device/gameconsole/r36s/BoardConfig.mk
+
+          grep -n \
+            'TARGET_KERNEL_SOURCE.*kernel/gameconsole/r36s' \
+            device/gameconsole/common/BoardConfig.mk
+
+          grep -n \
+            'TARGET_KERNEL_CROSS_COMPILE_PREFIX' \
+            device/gameconsole/common/BoardConfig.mk
+
+      - name: Build boot.img only
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd "$ANDROID_BUILD_TOP"
+
+          export PATH="$TOOLCHAIN/bin:$PATH"
+          export USE_CCACHE=0
+
+          source build/envsetup.sh
+
+          lunch lineage_r36s-userdebug
+
+          m -j"$BUILD_JOBS" bootimage
+
+      - name: Verify boot.img
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd "$ANDROID_BUILD_TOP"
+
+          BOOTIMG="out/target/product/r36s/boot.img"
+
+          test -f "$BOOTIMG"
+          test -s "$BOOTIMG"
+
+          echo "boot.img:"
+          ls -lh "$BOOTIMG"
+
+          file "$BOOTIMG"
+
+          echo "Output directory:"
+          ls -lah out/target/product/r36s/ | sed -n '1,120p'
+
+      - name: Upload boot.img
+        uses: actions/upload-artifact@v4
+        with:
+          name: r36s-boot-img
+          path: android/out/target/product/r36s/boot.img
+          if-no-files-found: error
+          retention-days: 14
